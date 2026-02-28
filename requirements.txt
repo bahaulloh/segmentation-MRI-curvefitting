@@ -1,0 +1,8 @@
+streamlit
+pydicom
+numpy
+opencv-python-headless
+pandas
+scipy
+matplotlib
+openpyxl

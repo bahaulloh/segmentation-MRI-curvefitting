@@ -10,7 +10,7 @@ from scipy.optimize import curve_fit
 import matplotlib.pyplot as plt
 
 # ==================== KONFIGURASI HALAMAN ====================
-st.set_page_config(page_title="MRI DICOM Dashboard", page_icon="🩻", layout="wide")
+st.set_page_config(page_title="MRI DICOM Dashboard", layout="wide")
 
 st.markdown("""
 <style>
@@ -25,7 +25,7 @@ button[kind="primary"] {
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🩻 MRI DICOM Dashboard (ZIP per TE/TR)")
+st.title("MRI DICOM Dashboard (ZIP per TE/TR)")
 
 # ==================== INISIALISASI SESSION STATE ====================
 if "dicom_data" not in st.session_state:
@@ -357,4 +357,4 @@ elif tab == "3️⃣ Curve Fitting":
     with col1:
         if st.button("⬅️ Kembali ke Segmentasi ROI", use_container_width=True):
             st.session_state["current_tab"] = "2️⃣ Segmentasi ROI"
-            st.rerun()
+            st.rerun             

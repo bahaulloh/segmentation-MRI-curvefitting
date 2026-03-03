@@ -219,6 +219,7 @@ elif tab == "2️⃣ Segmentasi ROI":
     df.loc["Rata-rata"] = df.mean()
     st.dataframe(df.style.format("{:.2f}"))
 
+    # Tombol simpan untuk 1 file
     if st.button("💾 Simpan hasil ke Excel & Memori", use_container_width=True):
         outname = f"hasil_intensitas_{selected_file.replace('.zip','')}.xlsx"
         df.to_excel(outname)
@@ -226,6 +227,26 @@ elif tab == "2️⃣ Segmentasi ROI":
             st.session_state["segment_results"] = {}
         st.session_state["segment_results"][selected_file] = df
         st.success(f"Hasil disimpan & dimuat ke memori: {outname}")
+
+    # 🔹 Tombol baru: Simpan seluruh hasil TE/TR sekaligus
+    if st.button("💾 Simpan Seluruh Hasil Intensitas (semua TE/TR)", use_container_width=True):
+        for fname, info in st.session_state["dicom_data"].items():
+            dicoms = info["dicoms"]
+            hasil_all = []
+            for inst, ds in dicoms:
+                arr = ds.pixel_array.astype(np.float32)
+                data = {}
+                for (cx, cy, r, label) in grid_rois:
+                    mask = np.zeros_like(arr, dtype=np.uint8)
+                    cv2.circle(mask, (cx, cy), r, 255, -1)
+                    data[label] = float(np.mean(arr[mask == 255]))
+                hasil_all.append(data)
+            df_all = pd.DataFrame(hasil_all)
+            df_all.loc["Rata-rata"] = df_all.mean()
+            outname_all = f"hasil_intensitas_{fname.replace('.zip','')}.xlsx"
+            df_all.to_excel(outname_all)
+            st.session_state["segment_results"][fname] = df_all
+        st.success("✅ Semua hasil intensitas dari seluruh TE/TR telah disimpan & dimuat.")
 
     st.markdown("---")
     col1, col2 = st.columns([1, 1])
@@ -254,107 +275,135 @@ elif tab == "3️⃣ Curve Fitting":
     te_tr_pairs.sort(key=lambda x: x[0])
     TE_values = np.array([t[0] for t in te_tr_pairs])
 
-    selected_roi = st.selectbox("Pilih ROI untuk fitting:", results[te_tr_pairs[0][1]].columns)
+    # === Pilihan ROI untuk grafik ===
+    selected_roi = st.selectbox("Pilih Jenis Material:", results[te_tr_pairs[0][1]].columns)
+
+    # === Fitting dengan dan tanpa offset ===
     intensitas = np.array([results[f].loc["Rata-rata", selected_roi] for _, f in te_tr_pairs])
-
-    # --- Model fungsi ---
-    def trie_exp(te, A1, T2_1, A2, T2_2, A3, T2_3):
-        return A1*np.exp(-te/T2_1)+A2*np.exp(-te/T2_2)+A3*np.exp(-te/T2_3)
-    def trie_exp_offset(te, A1,T2_1,A2,T2_2,A3,T2_3,C):
-        return A1*np.exp(-te/T2_1)+A2*np.exp(-te/T2_2)+A3*np.exp(-te/T2_3)+C
-
-    # --- Normalisasi dan fitting ---
     y_raw = intensitas.astype(float)
     s0_guess = y_raw[0]
     y_norm = y_raw / s0_guess
 
-    p0_no_offset = [0.5, 30, 0.3, 100, 0.2, 500]
-    bounds_no_offset = ([0, 10, 0, 50, 0, 200], [1, 1000, 1, 1500, 1, 5000])
-    p0_offset = [0.3, 15, 0.4, 80, 0.3, 300, 0.01]
-    bounds_offset = ([0, 1, 0, 30, 0, 200, -0.2], [1, 30, 1, 200, 1, 1500, 0.5])
-
+    def trie_exp(te, A1, T2_1, A2, T2_2, A3, T2_3):
+        return A1*np.exp(-te/T2_1)+A2*np.exp(-te/T2_2)+A3*np.exp(-te/T2_3)
+    def trie_exp_offset(te, A1,T2_1,A2,T2_2,A3,T2_3,C):
+        return A1*np.exp(-te/T2_1)+A2*np.exp(-te/T2_2)+A3*np.exp(-te/T2_3)+C
     def calc_metrics(y_true, y_pred):
-        residuals = y_true - y_pred
-        ss_res = np.sum(residuals**2)
-        ss_tot = np.sum((y_true - np.mean(y_true))**2)
-        r2 = 1 - (ss_res / ss_tot)
-        rmse = np.sqrt(ss_res / len(y_true))
-        return r2, rmse
+        res = y_true - y_pred
+        ss_res, ss_tot = np.sum(res**2), np.sum((y_true - np.mean(y_true))**2)
+        return 1 - ss_res/ss_tot, np.sqrt(ss_res/len(y_true))
 
+    # Parameter awal dan batas
+    p0_no = [0.5,30,0.3,100,0.2,500]
+    p0_off = [0.3,15,0.4,80,0.3,300,0.01]
+    bounds_no = ([0,10,0,50,0,200],[1,1000,1,1500,1,5000])
+    bounds_off = ([0,1,0,30,0,200,-0.2],[1,30,1,200,1,1500,0.5])
+
+    # Fitting tanpa offset
     try:
-        p_no, _ = curve_fit(trie_exp, TE_values, y_norm, p0=p0_no_offset,
-                            bounds=bounds_no_offset, maxfev=50000)
-        y_pred_no = trie_exp(TE_values, *p_no)
-        r2_no, rmse_no = calc_metrics(y_norm, y_pred_no)
-    except Exception as e:
-        st.warning(f"Gagal fitting tanpa offset: {e}")
-        p_no, y_pred_no, r2_no, rmse_no = [np.nan]*6, np.zeros_like(y_norm), np.nan, np.nan
+        p_no, _ = curve_fit(trie_exp, TE_values, y_norm, p0=p0_no, bounds=bounds_no, maxfev=50000)
+        y_plot_no = trie_exp(np.linspace(TE_values.min(), TE_values.max(), 300), *p_no)
+        r2_no, rmse_no = calc_metrics(y_norm, trie_exp(TE_values, *p_no))
+    except Exception:
+        p_no = np.full(6, np.nan)
+        y_plot_no = np.full(300, np.nan)
+        r2_no, rmse_no = np.nan, np.nan
 
+    # Fitting dengan offset
     try:
-        p_opt, _ = curve_fit(trie_exp_offset, TE_values, y_norm, p0=p0_offset,
-                             bounds=bounds_offset, maxfev=50000)
-        y_pred_off = trie_exp_offset(TE_values, *p_opt)
-        r2_off, rmse_off = calc_metrics(y_norm, y_pred_off)
-    except Exception as e:
-        st.error(f"Gagal fitting dengan offset: {e}")
-        st.stop()
+        p_opt, _ = curve_fit(trie_exp_offset, TE_values, y_norm, p0=p0_off, bounds=bounds_off, maxfev=50000)
+        y_plot_off = trie_exp_offset(np.linspace(TE_values.min(), TE_values.max(), 300), *p_opt)
+        r2, rmse = calc_metrics(y_norm, trie_exp_offset(TE_values, *p_opt))
+    except Exception:
+        p_opt = np.full(7, np.nan)
+        y_plot_off = np.full(300, np.nan)
+        r2, rmse = np.nan, np.nan
 
-    # --- Plotting ---
-    te_plot = np.linspace(TE_values.min(), TE_values.max(), 500)
-    y_plot_off = trie_exp_offset(te_plot, *p_opt) * s0_guess
-    y_plot_no = trie_exp(te_plot, *p_no) * s0_guess
+    # === Plot hasil fitting ===
+    import matplotlib.pyplot as plt
+    te_plot = np.linspace(TE_values.min(), TE_values.max(), 300)
+    material = selected_roi
 
-    plt.figure(figsize=(8,6))
+    plt.figure(figsize=(8, 6))
     plt.scatter(TE_values, y_raw, color='black', label='Data Eksperimen (SI)')
-    plt.plot(te_plot, y_plot_off, 'r-', linewidth=2, label=f'Tri-exponential Fit with Offset (R²={r2_off:.4f})')
-    plt.plot(te_plot, y_plot_no, 'b--', linewidth=2, label=f'Tri-exponential Fit without Offset (R²={r2_no:.4f})')
 
-    # Kotak info parameter
-    A1, T2_1, A2, T2_2, A3, T2_3, C = p_opt
-    info_text = (
-        f"Result for {selected_roi} (Offset Model):\n"
-        f"--------------------------\n"
-        f"T2₁  : {T2_1:.2f} ms\n"
-        f"T2₂  : {T2_2:.2f} ms\n"
-        f"T2₃  : {T2_3:.2f} ms\n"
-        f"Offset : {C*s0_guess:.2f}\n"
-        f"--------------------------\n"
-        f"R²   : {r2_off:.4f}\n"
-        f"RMSE : {rmse_off*s0_guess:.4f}"
-    )
-    plt.text(0.97, 0.97, info_text, transform=plt.gca().transAxes, fontsize=10,
-             va='top', ha='right', bbox=dict(boxstyle='round,pad=0.5', facecolor='white', alpha=0.8))
-    plt.title(f"T2 Relaxation Decay - {selected_roi}", fontsize=14)
-    plt.xlabel("Echo Time (TE) [ms]")
-    plt.ylabel("Signal Intensity (SI)")
+    if not np.isnan(y_plot_off).all():
+        plt.plot(te_plot, y_plot_off*s0_guess, 'r-', linewidth=2,
+                 label='Tri-exponential Fit with Offset (R²={:.4f})'.format(r2 if not np.isnan(r2) else np.nan))
+    if not np.isnan(y_plot_no).all():
+        plt.plot(te_plot, y_plot_no*s0_guess, 'b--', linewidth=2,
+                 label='Tri-exponential Fit without Offset (R²={:.4f})'.format(r2_no if not np.isnan(r2_no) else np.nan))
+
+    # --- Kotak informasi hasil parameter (offset model) ---
+    if not np.isnan(p_opt).all():
+        A1_s, A2_s, A3_s = [p_opt[0]*s0_guess, p_opt[2]*s0_guess, p_opt[4]*s0_guess]
+        T2_1, T2_2, T2_3 = p_opt[1], p_opt[3], p_opt[5]
+        Offset_s = p_opt[6]*s0_guess
+        rmse_s = rmse*s0_guess
+        info_text = (
+            f"Result for {material} (Offset Model):\n"
+            f"--------------------------\n"
+            f"T2₁        : {T2_1:.2f} ms\n"
+            f"T2₂        : {T2_2:.2f} ms\n"
+            f"T2₃        : {T2_3:.2f} ms\n"
+            f"Offset     : {Offset_s:.2f}\n"
+            f"--------------------------\n"
+            f"R²         : {r2:.4f}\n"
+            f"RMSE       : {rmse_s:.4f}"
+        )
+        plt.text(0.95, 0.95, info_text, transform=plt.gca().transAxes, fontsize=10,
+                 verticalalignment='top', horizontalalignment='right',
+                 bbox=dict(boxstyle='round,pad=0.5', facecolor='white', alpha=0.8, edgecolor='gray'))
+
+    plt.title(f"T2 Relaxation Decay - {material}", fontsize=14, pad=15)
+    plt.xlabel("Echo Time (TE) [ms]", fontsize=12)
+    plt.ylabel("Signal Intensity (SI)", fontsize=12)
     plt.legend(loc='lower left')
     plt.grid(True, linestyle='--', alpha=0.6)
+    plt.tight_layout()
     st.pyplot(plt)
 
-    # --- Tabel hasil parameter ---
-    A1_s, A2_s, A3_s = [p_opt[0]*s0_guess, p_opt[2]*s0_guess, p_opt[4]*s0_guess]
-    Offset_s = p_opt[6]*s0_guess
-    RMSE_s = rmse_off*s0_guess
+    # === Rekap seluruh ROI ===
+    rekap_data = []
+    for roi in results[te_tr_pairs[0][1]].columns:
+        intensitas = np.array([results[f].loc["Rata-rata", roi] for _, f in te_tr_pairs])
+        y_raw = intensitas.astype(float)
+        s0_guess = y_raw[0]
+        y_norm = y_raw / s0_guess
+        try:
+            p_opt, _ = curve_fit(trie_exp_offset, TE_values, y_norm, p0=p0_off, bounds=bounds_off, maxfev=50000)
+            r2, rmse = calc_metrics(y_norm, trie_exp_offset(TE_values, *p_opt))
+            rekap_data.append({
+                "Material": roi,
+                "A1": p_opt[0]*s0_guess, "T2_1": p_opt[1],
+                "A2": p_opt[2]*s0_guess, "T2_2": p_opt[3],
+                "A3": p_opt[4]*s0_guess, "T2_3": p_opt[5],
+                "Offset": p_opt[6]*s0_guess, "R²": r2, "RMSE": rmse*s0_guess
+            })
+        except:
+            continue
 
-    df_result = pd.DataFrame([{
-        "Material": selected_roi,
-        "A1": A1_s, "T2_1": T2_1,
-        "A2": A2_s, "T2_2": T2_2,
-        "A3": A3_s, "T2_3": T2_3,
-        "Offset": Offset_s, "R²": r2_off, "RMSE": RMSE_s
-    }])
-    st.markdown("### 📊 Hasil Parameter Fitting (Offset Model)")
-    styled_df = df_result.style.format({
-        "A1": "{:.2e}", "T2_1": "{:.2f}",
-        "A2": "{:.2e}", "T2_2": "{:.2f}",
-        "A3": "{:.4f}", "T2_3": "{:.2f}",
-        "Offset": "{:.2f}", "R²": "{:.4f}", "RMSE": "{:.4f}"
-        })
-    st.dataframe(styled_df, use_container_width=True)
-    
+    df_rekap = pd.DataFrame(rekap_data)
+    st.markdown("### 📊 Rekap Parameter Fitting Semua ROI")
+    st.dataframe(df_rekap.style.format({
+        "A1": "{:.2e}", "T2_1": "{:.2f}", "A2": "{:.2e}", "T2_2": "{:.2f}",
+        "A3": "{:.2e}", "T2_3": "{:.2f}", "Offset": "{:.2f}",
+        "R²": "{:.4f}", "RMSE": "{:.4f}"
+    }), use_container_width=True)
+
+    # Tombol download Excel
+    from io import BytesIO
+    output_excel = BytesIO()
+    df_rekap.to_excel(output_excel, index=False)
+    st.download_button(
+        "📥 Download Rekap Semua Material (XLSX)",
+        data=output_excel.getvalue(),
+        file_name="rekap_fitting_T2_semua_material.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True
+    )
+
     st.markdown("---")
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        if st.button("⬅️ Kembali ke Segmentasi ROI", use_container_width=True):
-            st.session_state["current_tab"] = "2️⃣ Segmentasi ROI"
-            st.rerun             
+    if st.button("⬅️ Kembali ke Segmentasi ROI", use_container_width=True):
+        st.session_state["current_tab"] = "2️⃣ Segmentasi ROI"
+        st.rerun()
